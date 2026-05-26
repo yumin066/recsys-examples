@@ -37,7 +37,10 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 root_path: Path = Path(__file__).resolve().parent
 
 cmd = ["git", "rev-parse", "HEAD"]
-sha = subprocess.check_output(cmd, cwd=str(root_path)).decode("ascii").strip()
+try:
+    sha = subprocess.check_output(cmd, cwd=str(root_path)).decode("ascii").strip()
+except (subprocess.CalledProcessError, FileNotFoundError):
+    sha = os.getenv("HSTU_BUILD_VERSION", "unknown")
 
 PACKAGE_NAME = "hstu_attn"
 
@@ -122,6 +125,30 @@ def nvcc_threads_args():
     return ["--threads", nvcc_threads]
 
 
+def cuda_arch_flags(default_archs):
+    arch_list = os.getenv("TORCH_CUDA_ARCH_LIST")
+    raw_archs = arch_list.replace(";", " ").split() if arch_list else default_archs
+
+    archs = []
+    for raw_arch in raw_archs:
+        arch = raw_arch.lower().replace("+ptx", "")
+        arch = arch.removeprefix("sm_").removeprefix("compute_").replace(".", "")
+        if not arch.isdigit():
+            warnings.warn(f"Ignoring unsupported CUDA arch entry: {raw_arch}")
+            continue
+        if arch not in archs:
+            archs.append(arch)
+
+    if not archs:
+        archs = default_archs
+
+    flags = []
+    for arch in archs:
+        flags += ["-gencode", f"arch=compute_{arch},code=sm_{arch}"]
+    print(f"CUDA arch flags: {' '.join(flags)}")
+    return flags
+
+
 def generate_cuda_sources():
     ARCH_SM = ["80"] + (["89"] if not DISABLE_86OR89 else [])
     DTYPE_FWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (
@@ -164,7 +191,6 @@ def generate_cuda_sources():
         "fp16": "cutlass::half_t",
     }
 
-    subprocess.run(["rm", "-rf", "csrc/hstu_attn/src/generated/*"])
     sources_fwd_sm80 = []
     fwd_file_head = """
 // Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
@@ -273,10 +299,7 @@ if not SKIP_CUDA_BUILD:
             "FlashAttention is only supported on CUDA 11.6 and above.  "
             "Note: make sure nvcc has a supported version by running nvcc -V."
         )
-    cc_flag = []
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_80,code=sm_80")
-    # cc_flag.append("arch=compute_86,code=sm_86")
+    cc_flag = cuda_arch_flags(["80"])
 
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
